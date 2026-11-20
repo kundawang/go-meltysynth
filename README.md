@@ -86,6 +86,28 @@ right := make([]float32, length)
 sequencer.Render(left, right)
 ```
 
+To play a MIDI file with a tempo curve (e.g. gradually accelerating from a slow beat), use `PlayWithTempoCurve`. The curve is a piecewise-linear BPM curve specified by MIDI ticks (or by bars with `NewTempoCurveFromBars`), and overrides the tempo events in the file:
+
+```go
+// Accelerate linearly from 60 BPM to 240 BPM over the first 4 bars,
+// then stay at 240 BPM.
+curve, _ := meltysynth.NewTempoCurveFromBars(midiFile, []meltysynth.BarTempoPoint{
+    {Bar: 0, Bpm: 60},
+    {Bar: 4, Bpm: 240},
+})
+
+sequencer := meltysynth.NewMidiFileSequencer(synthesizer)
+sequencer.PlayWithTempoCurve(midiFile, curve, false)
+
+// The output buffer.
+length := int(float64(settings.SampleRate) * float64(midiFile.GetLengthWithTempoCurve(curve)) / float64(time.Second))
+left := make([]float32, length)
+right := make([]float32, length)
+
+// Render the waveform.
+sequencer.Render(left, right)
+```
+
 
 
 ## Todo

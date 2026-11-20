@@ -8,6 +8,7 @@ import (
 type MidiFileSequencer struct {
 	synthesizer *Synthesizer
 	midiFile    *MidiFile
+	times       []time.Duration
 	loop        bool
 	blockWrote  int32
 	currentTime time.Duration
@@ -22,7 +23,25 @@ func NewMidiFileSequencer(s *Synthesizer) *MidiFileSequencer {
 }
 
 func (seq *MidiFileSequencer) Play(midiFile *MidiFile, loop bool) {
+	seq.play(midiFile, midiFile.times, loop)
+}
+
+// PlayWithTempoCurve plays the MIDI file with the given tempo curve instead
+// of the tempo events in the file. The event times are computed by mapping
+// each event's tick through the curve, so notes that span curve boundaries
+// are not retriggered; only their timing changes. The curve should be built
+// with the same resolution as the MIDI file (see NewTempoCurveFromBars).
+func (seq *MidiFileSequencer) PlayWithTempoCurve(midiFile *MidiFile, curve *TempoCurve, loop bool) {
+	times := make([]time.Duration, len(midiFile.messages))
+	for i := range midiFile.messages {
+		times[i] = curve.TickToTime(midiFile.ticks[i])
+	}
+	seq.play(midiFile, times, loop)
+}
+
+func (seq *MidiFileSequencer) play(midiFile *MidiFile, times []time.Duration, loop bool) {
 	seq.midiFile = midiFile
+	seq.times = times
 	seq.loop = loop
 
 	seq.blockWrote = seq.synthesizer.BlockSize
@@ -36,6 +55,7 @@ func (seq *MidiFileSequencer) Play(midiFile *MidiFile, loop bool) {
 
 func (seq *MidiFileSequencer) Stop() {
 	seq.midiFile = nil
+	seq.times = nil
 
 	seq.synthesizer.Reset()
 }
@@ -68,7 +88,7 @@ func (seq *MidiFileSequencer) processEvents() {
 
 	msgLength := int32(len(seq.midiFile.messages))
 	for seq.msgIndex < msgLength {
-		time := seq.midiFile.times[seq.msgIndex]
+		time := seq.times[seq.msgIndex]
 		msg := seq.midiFile.messages[seq.msgIndex]
 		if time <= seq.currentTime {
 			if msg.getMessageType() == msg_Normal {

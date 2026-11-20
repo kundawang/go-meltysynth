@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"time"
 )
 
@@ -25,6 +26,20 @@ type message struct {
 type MidiFile struct {
 	messages []message
 	times    []time.Duration
+
+	// The tick positions of the merged messages, parallel to messages.
+	ticks []int32
+	// The resolution (ticks per quarter note) of the MIDI file.
+	resolution int16
+	// The time signature changes in the MIDI file, sorted by tick.
+	timeSignatures []timeSignature
+}
+
+// timeSignature represents a time signature change in a MIDI file.
+type timeSignature struct {
+	tick        int32
+	numerator   int32
+	denominator int32 // The actual denominator (e.g. 4 for 4/4), not the MIDI-encoded exponent.
 }
 
 func newMessage(channel byte, command byte, data1 byte, data2 byte) message {
@@ -118,40 +133,46 @@ func NewMidiFile(r io.Reader) (*MidiFile, error) {
 
 	messageLists := make([][]message, trackCount)
 	tickLists := make([][]int32, trackCount)
+	timeSignatureLists := make([][]timeSignature, trackCount)
 	for i := int16(0); i < trackCount; i++ {
-		messageList, tickList, err := readTrack(r)
+		messageList, tickList, timeSignatureList, err := readTrack(r)
 		if err != nil {
 			return nil, err
 		}
 		messageLists[i] = messageList
 		tickLists[i] = tickList
+		timeSignatureLists[i] = timeSignatureList
 	}
 
-	messages, times := mergeTracks(messageLists, tickLists, resolution)
+	messages, times, ticks, timeSignatures := mergeTracks(messageLists, tickLists, timeSignatureLists, resolution)
 
 	result := new(MidiFile)
 	result.messages = messages
 	result.times = times
+	result.ticks = ticks
+	result.resolution = resolution
+	result.timeSignatures = timeSignatures
 
 	return result, nil
 }
 
-func readTrack(r io.Reader) ([]message, []int32, error) {
+func readTrack(r io.Reader) ([]message, []int32, []timeSignature, error) {
 	var n int
 	var err error
 
 	chunkType, err := readFourCC(r)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if chunkType != "MTrk" {
-		return nil, nil, fmt.Errorf(`the chunk type must be "MTrk", but was %q`, chunkType)
+		return nil, nil, nil, fmt.Errorf(`the chunk type must be "MTrk", but was %q`, chunkType)
 	}
 
 	r.Read(make([]byte, 4))
 
 	messages := make([]message, 0, 300)
 	ticks := make([]int32, 0, 300)
+	timeSignatures := make([]timeSignature, 0, 4)
 
 	var tick int32
 	var lastStatus byte
@@ -159,13 +180,13 @@ func readTrack(r io.Reader) ([]message, []int32, error) {
 	for {
 		delta, err := readIntVariableLength(r)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		var first byte
 		err = binary.Read(r, binary.LittleEndian, &first)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		tick += delta
@@ -179,7 +200,7 @@ func readTrack(r io.Reader) ([]message, []int32, error) {
 				var data2 byte
 				err = binary.Read(r, binary.LittleEndian, &data2)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				messages = append(messages, common3b(lastStatus, first, data2))
 				ticks = append(ticks, tick)
@@ -192,39 +213,48 @@ func readTrack(r io.Reader) ([]message, []int32, error) {
 		case 0xF0: // System Exclusive
 			err = discardData(r)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 
 		case 0xF7: // System Exclusive
 			err = discardData(r)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 
 		case 0xFF: // Meta Event
 			var metaEvent byte
 			err = binary.Read(r, binary.LittleEndian, &metaEvent)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			switch metaEvent {
 			case 0x2F: // End of Track
 				n, err = r.Read(make([]byte, 1))
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				if n != 1 {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				messages = append(messages, endOfTrack())
 				ticks = append(ticks, tick)
-				return messages, ticks, nil
+				return messages, ticks, timeSignatures, nil
+
+			case 0x58: // Time Signature
+				var ts timeSignature
+				ts, err = readTimeSignature(r)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				ts.tick = tick
+				timeSignatures = append(timeSignatures, ts)
 
 			case 0x51: // Tempo
 				var tempo int32
 				tempo, err = readTempo(r)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				messages = append(messages, tempoChange(tempo))
 				ticks = append(ticks, tick)
@@ -232,7 +262,7 @@ func readTrack(r io.Reader) ([]message, []int32, error) {
 			default:
 				err = discardData(r)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 			}
 
@@ -242,7 +272,7 @@ func readTrack(r io.Reader) ([]message, []int32, error) {
 				var data1 byte
 				err = binary.Read(r, binary.LittleEndian, &data1)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				messages = append(messages, common2b(first, data1))
 				ticks = append(ticks, tick)
@@ -250,12 +280,12 @@ func readTrack(r io.Reader) ([]message, []int32, error) {
 				var data1 byte
 				err = binary.Read(r, binary.LittleEndian, &data1)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				var data2 byte
 				err = binary.Read(r, binary.LittleEndian, &data2)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				messages = append(messages, common3b(first, data1, data2))
 				ticks = append(ticks, tick)
@@ -266,9 +296,18 @@ func readTrack(r io.Reader) ([]message, []int32, error) {
 	}
 }
 
-func mergeTracks(messageLists [][]message, tickLists [][]int32, resolution int16) ([]message, []time.Duration) {
+func mergeTracks(messageLists [][]message, tickLists [][]int32, timeSignatureLists [][]timeSignature, resolution int16) ([]message, []time.Duration, []int32, []timeSignature) {
 	mergedMessages := make([]message, 0, 1000)
 	mergedTimes := make([]time.Duration, 0, 1000)
+	mergedTicks := make([]int32, 0, 1000)
+
+	mergedTimeSignatures := make([]timeSignature, 0, 4)
+	for _, list := range timeSignatureLists {
+		mergedTimeSignatures = append(mergedTimeSignatures, list...)
+	}
+	sort.SliceStable(mergedTimeSignatures, func(i, j int) bool {
+		return mergedTimeSignatures[i].tick < mergedTimeSignatures[j].tick
+	})
 
 	indices := make([]int, len(messageLists))
 
@@ -308,12 +347,43 @@ func mergeTracks(messageLists [][]message, tickLists [][]int32, resolution int16
 		} else {
 			mergedMessages = append(mergedMessages, message)
 			mergedTimes = append(mergedTimes, currentTime)
+			mergedTicks = append(mergedTicks, currentTick)
 		}
 
 		indices[minIndex]++
 	}
 
-	return mergedMessages, mergedTimes
+	return mergedMessages, mergedTimes, mergedTicks, mergedTimeSignatures
+}
+
+func readTimeSignature(r io.Reader) (timeSignature, error) {
+	size, err := readIntVariableLength(r)
+	if err != nil {
+		return timeSignature{}, err
+	}
+	if size != 4 {
+		return timeSignature{}, errors.New("failed to read the time signature value")
+	}
+
+	var bs [4]byte
+	n, err := r.Read(bs[:])
+	if err != nil {
+		return timeSignature{}, err
+	}
+	if n != 4 {
+		return timeSignature{}, errors.New("failed to read the time signature value")
+	}
+
+	// The denominator is encoded as a power of two.
+	// Reject absurdly large exponents instead of silently overflowing.
+	if bs[1] > 30 {
+		return timeSignature{}, fmt.Errorf("the denominator of the time signature is too large: 2^%d", bs[1])
+	}
+
+	var ts timeSignature
+	ts.numerator = int32(bs[0])
+	ts.denominator = int32(1) << bs[1]
+	return ts, nil
 }
 
 func readTempo(r io.Reader) (int32, error) {
@@ -359,4 +429,64 @@ func discardData(r io.Reader) error {
 
 func (mf *MidiFile) GetLength() time.Duration {
 	return mf.times[len(mf.times)-1]
+}
+
+// GetTickLength gets the tick position of the last event in the MIDI file.
+func (mf *MidiFile) GetTickLength() int32 {
+	return mf.ticks[len(mf.ticks)-1]
+}
+
+// GetLengthWithTempoCurve gets the playback length of the MIDI file
+// when it is played with the given tempo curve.
+func (mf *MidiFile) GetLengthWithTempoCurve(curve *TempoCurve) time.Duration {
+	return curve.TickToTime(mf.GetTickLength())
+}
+
+// barToTick converts a 0-based bar index to a MIDI tick using the time
+// signatures in the MIDI file. Bars before the first time signature event
+// (or all bars, if the file has none) use 4/4. Fractional bar positions
+// resulting from non-integral bar lengths are rounded to the nearest tick.
+// An error is returned if the bar is negative or the resulting tick
+// exceeds the MIDI tick range.
+func (mf *MidiFile) barToTick(bar int32) (int32, error) {
+	if bar < 0 {
+		return 0, fmt.Errorf("the bar index must be non-negative, but was %d", bar)
+	}
+
+	resolution := float64(mf.resolution)
+	numerator := float64(4)
+	denominator := float64(4)
+	segmentStart := int64(0)
+	remaining := float64(bar)
+
+	for _, ts := range mf.timeSignatures {
+		if int64(ts.tick) <= segmentStart {
+			// The time signature at (or before) the current position takes
+			// effect immediately; later ones at the same tick override earlier ones.
+			numerator = float64(ts.numerator)
+			denominator = float64(ts.denominator)
+			continue
+		}
+
+		ticksPerBar := resolution * 4 * numerator / denominator
+		segmentBars := float64(int64(ts.tick)-segmentStart) / ticksPerBar
+		if remaining < segmentBars {
+			return roundTick(float64(segmentStart) + remaining*ticksPerBar)
+		}
+
+		remaining -= segmentBars
+		segmentStart = int64(ts.tick)
+		numerator = float64(ts.numerator)
+		denominator = float64(ts.denominator)
+	}
+
+	ticksPerBar := resolution * 4 * numerator / denominator
+	return roundTick(float64(segmentStart) + remaining*ticksPerBar)
+}
+
+func roundTick(value float64) (int32, error) {
+	if value > float64(math.MaxInt32) {
+		return 0, fmt.Errorf("the tick position %f exceeds the maximum MIDI tick", value)
+	}
+	return int32(math.Round(value)), nil
 }
