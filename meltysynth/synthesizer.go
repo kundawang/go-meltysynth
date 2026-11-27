@@ -28,9 +28,16 @@ type Synthesizer struct {
 	blockLeft  []float32
 	blockRight []float32
 
-	inverseBlockSize float32
-
+	// blockRead counts how many samples of the current block have already
+	// been handed out. A value of BlockSize means the next block has to be
+	// synthesized before more samples can be read.
 	blockRead int32
+
+	// noteBlockOffset is the offset inside the block currently being rendered
+	// at which notes started by the next ProcessMidiMessage call should sound.
+	// It is set by the MIDI sequencer before it dispatches block events and
+	// reset to zero once the block has been synthesized.
+	noteBlockOffset int32
 
 	MasterVolume float32
 
@@ -91,8 +98,6 @@ func NewSynthesizer(sf *SoundFont, settings *SynthesizerSettings) (*Synthesizer,
 
 	result.blockLeft = make([]float32, result.BlockSize)
 	result.blockRight = make([]float32, result.BlockSize)
-
-	result.inverseBlockSize = 1 / float32(result.BlockSize)
 
 	result.blockRead = result.BlockSize
 
@@ -253,7 +258,7 @@ func (s *Synthesizer) NoteOn(channel int32, key int32, velocity int32) {
 
 					voice := s.voices.requestNew(instrumentRegion, channel)
 					if voice != nil {
-						voice.start(regionPair, channel, key, velocity)
+						voice.startAt(regionPair, channel, key, velocity, s.noteBlockOffset)
 					}
 				}
 			}
@@ -316,6 +321,7 @@ func (s *Synthesizer) Reset() {
 	}
 
 	s.blockRead = s.BlockSize
+	s.noteBlockOffset = 0
 }
 
 func (s *Synthesizer) Render(left []float32, right []float32) {
@@ -339,6 +345,41 @@ func (s *Synthesizer) Render(left []float32, right []float32) {
 		s.blockRead += rem
 		wrote += rem
 	}
+}
+
+// invalidateBlock discards the cached block so that the next render starts a
+// fresh block. It is called when the sequencer wraps around a loop, where the
+// block grid has to be re-aligned to the new loop position.
+func (s *Synthesizer) invalidateBlock() {
+	s.blockRead = s.BlockSize
+	s.noteBlockOffset = 0
+}
+
+// setNoteBlockOffset records the offset inside the block currently being
+// rendered at which subsequently dispatched note-on events should start. The
+// MIDI sequencer uses this to place notes at arbitrary PCM sample positions.
+func (s *Synthesizer) setNoteBlockOffset(offset int32) {
+	s.noteBlockOffset = offset
+}
+
+// renderBlockAt synthesizes one full block after the caller has dispatched
+// every MIDI event belonging to it. Any note-on events dispatched for this
+// block already recorded their internal offset via setNoteBlockOffset.
+func (s *Synthesizer) renderBlockAt() {
+	s.renderBlock()
+	s.blockRead = 0
+	s.noteBlockOffset = 0
+}
+
+// readBlockRange copies length samples starting at offset out of the cached,
+// already rendered block. It does not advance any synthesis state, so a block
+// can be split across arbitrarily many reads without changing the output.
+func (s *Synthesizer) readBlockRange(offset int32, length int32, left []float32, right []float32) {
+	for i := int32(0); i < length; i++ {
+		left[i] = s.blockLeft[offset+i]
+		right[i] = s.blockRight[offset+i]
+	}
+	s.blockRead = offset + length
 }
 
 func (s *Synthesizer) renderBlock() {
@@ -405,7 +446,8 @@ func (s *Synthesizer) writeBlock(previousGain float32, currentGain float32, sour
 	if math.Abs(float64(currentGain-previousGain)) < 1.0e-3 {
 		arrayMultiplyAdd(currentGain, source, destination)
 	} else {
-		step := s.inverseBlockSize * (currentGain - previousGain)
+		inverseLength := float32(1) / float32(len(source))
+		step := inverseLength * (currentGain - previousGain)
 		arrayMultiplyAddSlope(previousGain, step, source, destination)
 	}
 }

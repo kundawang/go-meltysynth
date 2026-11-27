@@ -66,6 +66,12 @@ type voice struct {
 	// This is used to smooth out the cutoff frequency.
 	smoothedCutoff float32
 
+	// blockOffset is the sample position inside the current synthesizer block
+	// at which this voice starts sounding. Samples before the offset are
+	// silent, which lets a note start at any PCM sample inside a block while
+	// the voices are still processed for a full block.
+	blockOffset int32
+
 	voiceState  int32
 	voiceLength int32
 }
@@ -84,6 +90,13 @@ func newVoice(s *Synthesizer) *voice {
 }
 
 func (v *voice) start(region regionPair, channel int32, key int32, velocity int32) {
+	v.startAt(region, channel, key, velocity, 0)
+}
+
+// startAt starts the voice at the given offset inside the next synthesizer
+// block. Samples before the offset stay silent in that first block, allowing
+// sample-accurate note placement while keeping block-aligned processing.
+func (v *voice) startAt(region regionPair, channel int32, key int32, velocity int32, blockOffset int32) {
 	v.exclusiveClass = region.GetExclusiveClass()
 	v.channel = channel
 	v.key = key
@@ -128,6 +141,7 @@ func (v *voice) start(region regionPair, channel int32, key int32, velocity int3
 
 	v.smoothedCutoff = v.cutoff
 
+	v.blockOffset = blockOffset
 	v.voiceState = voice_Playing
 	v.voiceLength = 0
 }
@@ -223,6 +237,13 @@ func (v *voice) process() bool {
 		v.previousMixGainRight = v.currentMixGainRight
 		v.previousReverbSend = v.currentReverbSend
 		v.previousChorusSend = v.currentChorusSend
+
+		// Silence the part of the first block that precedes the note's start
+		// sample, so the voice begins exactly at its block offset.
+		for i := int32(0); i < v.blockOffset; i++ {
+			v.block[i] = 0
+		}
+		v.blockOffset = 0
 	}
 
 	v.voiceLength += v.synthesizer.BlockSize
