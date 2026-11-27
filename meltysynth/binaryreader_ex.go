@@ -8,12 +8,10 @@ import (
 
 func readFourCC(r io.Reader) (string, error) {
 	var data [4]byte
-	n, err := r.Read(data[:])
-	if err != nil {
+	// Use io.ReadFull so streaming readers that return one byte per Read
+	// are handled correctly.
+	if _, err := io.ReadFull(r, data[:]); err != nil {
 		return "", err
-	}
-	if n != 4 {
-		return "", errors.New("failed to read the four-cc")
 	}
 
 	for i := 0; i < 4; i++ {
