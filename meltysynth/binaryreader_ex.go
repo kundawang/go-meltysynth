@@ -27,12 +27,14 @@ func readFourCC(r io.Reader) (string, error) {
 }
 
 func readFixedLengthString(r io.Reader, length int32) (string, error) {
-	var data []byte = make([]byte, length)
-	n, err := r.Read(data[:])
-	if err != nil {
-		return "", err
+	if length < 0 {
+		return "", errors.New("the fixed length string has a negative length")
 	}
-	if n != int(length) {
+
+	// Read via a bounded, growth based buffer so a forged huge length does not
+	// pre-allocate a huge array.
+	data, err := readChunkPayload(r, int64(length))
+	if err != nil {
 		return "", errors.New("failed to read the fixed-length string")
 	}
 

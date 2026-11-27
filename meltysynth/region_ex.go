@@ -15,6 +15,15 @@ func (o *oscillator) startByRegion(data []int16, region regionPair) {
 	scaleTuning := region.GetScaleTuning()
 
 	o.start(data, loopMode, sampleRate, sampleStart, sampleEnd, startLoop, endLoop, rootKey, coarseTune, fineTune, scaleTuning)
+
+	// Optionally route the voice through the combined 24 bit sample data.
+	// Any failure of the gates leaves data24 nil so the exact legacy 16 bit
+	// path is used.
+	o.data24 = nil
+	if o.synthesizer != nil && o.synthesizer.is24BitPlaybackEnabled() &&
+		o.synthesizer.SoundFont != nil && len(o.synthesizer.SoundFont.WaveData24) == len(data) {
+		o.data24 = o.synthesizer.SoundFont.WaveData24
+	}
 }
 
 func (env *volumeEnvelope) startByRegion(region regionPair, key int32, velocity int32) {

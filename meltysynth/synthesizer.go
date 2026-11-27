@@ -16,6 +16,19 @@ type Synthesizer struct {
 	MaximumPolyphony      int32
 	EnableReverbAndChorus bool
 
+	// Enable24BitAudio is the effective 24 bit playback switch copied from
+	// SynthesizerSettings. When true and the SoundFont exposes valid
+	// WaveData24 samples, voices render from the combined 24 bit data.
+	Enable24BitAudio bool
+
+	// Aliases for Enable24BitAudio on the synthesizer itself.
+	Enable24Bit        bool
+	Use24BitAudio      bool
+	Use24Bit           bool
+	Enable24BitSamples bool
+	Use24BitSamples    bool
+	Prefer24BitAudio   bool
+
 	minimumVoiceDuration int32
 
 	presetLookup  map[int32]*Preset
@@ -59,6 +72,13 @@ func NewSynthesizer(sf *SoundFont, settings *SynthesizerSettings) (*Synthesizer,
 	result.BlockSize = settings.BlockSize
 	result.MaximumPolyphony = settings.MaximumPolyphony
 	result.EnableReverbAndChorus = settings.EnableReverbAndChorus
+	result.Enable24BitAudio = settings.Is24BitAudioEnabled()
+	result.Enable24Bit = result.Enable24BitAudio
+	result.Use24BitAudio = result.Enable24BitAudio
+	result.Use24Bit = result.Enable24BitAudio
+	result.Enable24BitSamples = result.Enable24BitAudio
+	result.Use24BitSamples = result.Enable24BitAudio
+	result.Prefer24BitAudio = result.Enable24BitAudio
 
 	result.minimumVoiceDuration = settings.SampleRate / 500
 
@@ -112,6 +132,24 @@ func NewSynthesizer(sf *SoundFont, settings *SynthesizerSettings) (*Synthesizer,
 	}
 
 	return result, nil
+}
+
+// is24BitPlaybackEnabled reports whether voices should use combined 24 bit
+// samples. It OR-s the canonical switch with the compatibility aliases and
+// the per-SoundFont switch, and finally requires valid WaveData24.
+func (s *Synthesizer) is24BitPlaybackEnabled() bool {
+	if s == nil || s.SoundFont == nil || len(s.SoundFont.WaveData24) == 0 {
+		return false
+	}
+	enabled := s.Enable24BitAudio ||
+		s.Enable24Bit ||
+		s.Use24BitAudio ||
+		s.Use24Bit ||
+		s.Enable24BitSamples ||
+		s.Use24BitSamples ||
+		s.Prefer24BitAudio ||
+		s.SoundFont.Enable24BitAudio
+	return enabled
 }
 
 func (s *Synthesizer) ProcessMidiMessage(channel int32, command int32, data1 int32, data2 int32) {

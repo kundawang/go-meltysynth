@@ -66,6 +66,10 @@ func newSoundFontInfo(r io.Reader) (*SoundFontInfo, error) {
 		}
 		pos += 4
 
+		if size < 0 {
+			return nil, fmt.Errorf("the info sub-chunk %q has a negative size %d", id, size)
+		}
+
 		switch id {
 		case "ifil":
 			result.Version, err = newSoundFontVersion(r)
@@ -98,6 +102,14 @@ func newSoundFontInfo(r io.Reader) (*SoundFontInfo, error) {
 		}
 
 		pos += size
+
+		// Consume the RIFF word-alignment pad byte for odd sized chunks.
+		if size&1 == 1 {
+			if err = skipRIFFPadByte(r); err != nil {
+				return nil, err
+			}
+			pos++
+		}
 	}
 
 	return result, nil

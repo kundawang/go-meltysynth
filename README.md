@@ -56,6 +56,30 @@ right := make([]float32, length)
 synthesizer.Render(left, right)
 ```
 
+### 24 bit samples (sm24)
+
+SoundFont 2.04 can store the least significant 8 bits of each sample in an
+optional `sm24` chunk alongside the 16 bit `smpl` data. Go-MeltySynth combines
+both chunks (`sample24 = smpl16 * 256 + sm24LowByte`) and exposes the result as
+`SoundFont.WaveData24` when the format version is 2.04 or newer and the chunk
+length matches the sample count (odd sized chunks and their RIFF alignment
+byte are handled).
+
+Playback stays bit-for-bit compatible with older versions by default. Set
+`Enable24BitAudio` to use the extra precision; fonts without a valid `sm24`
+chunk automatically fall back to the 16 bit data:
+
+```go
+settings := meltysynth.NewSynthesizerSettings(44100)
+settings.Enable24BitAudio = true // or settings.BitsPerSample = 24
+synthesizer, _ := meltysynth.NewSynthesizer(soundFont, settings)
+```
+
+Malformed `sm24` data (missing chunk, version/length mismatch, truncation or
+illegal sizes) never causes an unbounded allocation or a panic; it either
+returns a parse error for structural/truncation problems or deterministically
+falls back to 16 bit playback.
+
 Another example code to synthesize a MIDI file:
 
 ```go

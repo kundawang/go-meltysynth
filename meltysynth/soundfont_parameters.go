@@ -60,6 +60,13 @@ func newSoundFontParameters(r io.Reader) (*soundFontParameters, error) {
 		}
 		pos += 4
 
+		if size < 0 {
+			return nil, fmt.Errorf("the pdta sub-chunk %q has a negative size %d", id, size)
+		}
+		if int64(pos)+int64(size) > int64(end) {
+			return nil, fmt.Errorf("the pdta sub-chunk %q size %d exceeds the pdta list boundary", id, size)
+		}
+
 		switch id {
 		case "phdr":
 			presetInfos, err = readPresetsFromChunk(r, size)
